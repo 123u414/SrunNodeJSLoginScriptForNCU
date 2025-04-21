@@ -128,3 +128,11 @@ dist
 .yarn/build-state.yml
 .yarn/install-state.gz
 .pnp.*
+
+# custom local dependency directories
+creater.js
+login.har
+main.js
+Portal.js
+redirect.js
+Utils.js
