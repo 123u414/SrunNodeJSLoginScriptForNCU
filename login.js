@@ -1,14 +1,285 @@
 const axios = require('axios');
 const crypto = require('crypto');
+const readlineSync = require('readline-sync');
+const fs = require('fs');
+const path = require('path');
 
-const config = {
-    username: '',// 学号加上@ndcard
-    password: '',// 校园网密码
-    login_host: ''// 登陆地址,一般是222.204.3.154
+// Configuration file paths
+const CONFIG_DIR = process.platform === 'win32' ? 'C:\\etc' : '/etc';
+const CONFIG_FILE = path.join(CONFIG_DIR, 'srun_login.conf');
+const LOG_DIR = process.platform === 'win32' ? 'C:\\logs' : '/var/log';
+const LOG_FILE = path.join(LOG_DIR, 'srun_login.log');
+
+// Default configuration with validation rules
+const DEFAULT_CONFIG = {
+    username: '',
+    password: '',
+    login_host: '222.204.3.154',
+    auto_reconnect: true,
+    check_interval: 60,
+    check_url: 'https://www.bing.com',
+    retry_interval: 30,
+    max_retry_times: 0,
+    debug_mode: false,
+    network_type: ''  // New field for storing network type
 };
 
+// Log levels
+const LOG_LEVELS = {
+    DEBUG: 'DEBUG',
+    INFO: 'INFO',
+    WARN: 'WARN',
+    ERROR: 'ERROR'
+};
+
+// Ensure directory exists with error handling
+function ensureDirectoryExists(dir) {
+    try {
+        if (!fs.existsSync(dir)) {
+            fs.mkdirSync(dir, { recursive: true });
+        }
+    } catch (error) {
+        console.error(`[ERROR] Failed to create directory ${dir}: ${error.message}`);
+        process.exit(1);
+    }
+}
+
+// Initialize directories
+try {
+    ensureDirectoryExists(CONFIG_DIR);
+    ensureDirectoryExists(LOG_DIR);
+} catch (error) {
+    console.error(`[ERROR] Fatal: Could not initialize required directories: ${error.message}`);
+    process.exit(1);
+}
+
+// Enhanced logging function
+function log(message, level = LOG_LEVELS.INFO, showConsole = true) {
+    try {
+        const timestamp = new Date().toISOString();
+        const logMessage = `${timestamp} [${level}] ${message}\n`;
+
+        // Always write to log file
+        fs.appendFileSync(LOG_FILE, logMessage);
+
+        // Show in console based on level and showConsole flag
+        if (showConsole || level === LOG_LEVELS.ERROR || (config.debug_mode && level === LOG_LEVELS.DEBUG)) {
+            const consoleMessage = `[${level}] ${message}`;
+            if (level === LOG_LEVELS.ERROR) {
+                console.error(consoleMessage);
+            } else {
+                console.log(consoleMessage);
+            }
+        }
+    } catch (error) {
+        console.error(`[ERROR] Failed to write log: ${error.message}`);
+    }
+}
+
+// Validate configuration values
+function validateConfigValue(key, value) {
+    switch (key) {
+        case 'username':
+            return typeof value === 'string' && value.length > 0 && value.includes('@');
+        case 'password':
+            return typeof value === 'string' && value.length > 0;
+        case 'login_host':
+            return typeof value === 'string' && /^[0-9.]+$/.test(value);
+        case 'check_interval':
+        case 'retry_interval':
+            return Number.isInteger(value) && value >= 10;
+        case 'max_retry_times':
+            return Number.isInteger(value) && value >= 0;
+        case 'auto_reconnect':
+        case 'debug_mode':
+            return typeof value === 'boolean';
+        default:
+            return true;
+    }
+}
+
+// Load configuration file with enhanced error handling
+function loadConfig() {
+    try {
+        if (fs.existsSync(CONFIG_FILE)) {
+            const fileContent = fs.readFileSync(CONFIG_FILE, 'utf8');
+            const loadedConfig = { ...DEFAULT_CONFIG };
+
+            fileContent.split('\n').forEach(line => {
+                line = line.trim();
+                if (line && !line.startsWith('#')) {
+                    try {
+                        const [key, value] = line.split('=').map(str => str.trim());
+                        if (key in DEFAULT_CONFIG) {
+                            let parsedValue = value;
+                            if (value === 'true') parsedValue = true;
+                            else if (value === 'false') parsedValue = false;
+                            else if (!isNaN(value)) parsedValue = Number(value);
+
+                            if (validateConfigValue(key, parsedValue)) {
+                                loadedConfig[key] = parsedValue;
+                            } else {
+                                log(`Invalid value for ${key}: ${value}`, LOG_LEVELS.WARN);
+                            }
+                        }
+                    } catch (error) {
+                        log(`Failed to parse config line: ${line}`, LOG_LEVELS.WARN);
+                    }
+                }
+            });
+
+            return loadedConfig;
+        }
+    } catch (error) {
+        log(`Failed to read configuration file: ${error.message}`, LOG_LEVELS.ERROR);
+    }
+    return DEFAULT_CONFIG;
+}
+
+// Enhanced user input validation
+function getUserConfig() {
+    log('Configuration file not found or incomplete, starting interactive setup...', LOG_LEVELS.INFO);
+
+    let username;
+    while (true) {
+        username = readlineSync.question('Please enter your student ID: ').trim();
+        if (/^\d+$/.test(username)) {
+            break;
+        }
+        log('Invalid input: Please enter numbers only', LOG_LEVELS.ERROR);
+    }
+
+    // Network type selection with validation
+    const networkTypes = ['cmcc', 'ndcard', 'unicom', 'ncu'];
+    console.log('\nSelect your campus network type:');
+    networkTypes.forEach((type, index) => {
+        console.log(`${index + 1}. ${type}`);
+    });
+
+    let networkType;
+    while (true) {
+        const choice = readlineSync.question('Enter number (1-4): ');
+        if (/^[1-4]$/.test(choice)) {
+            networkType = networkTypes[parseInt(choice) - 1];
+            break;
+        }
+        log('Invalid choice: Please enter a number between 1 and 4', LOG_LEVELS.ERROR);
+    }
+
+    const password = readlineSync.question('Please enter your password: ', { hideEchoBack: true });
+    if (!password) {
+        log('Password cannot be empty', LOG_LEVELS.ERROR);
+        process.exit(1);
+    }
+
+    let login_host = readlineSync.question('Enter login server IP [222.204.3.154]: ').trim();
+    login_host = login_host || '222.204.3.154';
+    if (!/^(\d{1,3}\.){3}\d{1,3}$/.test(login_host)) {
+        log('Invalid IP address format, using default: 222.204.3.154', LOG_LEVELS.WARN);
+        login_host = '222.204.3.154';
+    }
+
+    // 修改自动重连选项的输入方式
+    let auto_reconnect;
+    while (true) {
+        const input = readlineSync.question('Enable auto reconnect? (Y/n) [Y]: ').trim().toLowerCase();
+        if (input === '' || input === 'y') {
+            auto_reconnect = true;
+            break;
+        } else if (input === 'n') {
+            auto_reconnect = false;
+            break;
+        }
+        log('Invalid input: Please enter Y or n', LOG_LEVELS.ERROR);
+    }
+
+    const config = {
+        ...DEFAULT_CONFIG,
+        username: `${username}@${networkType}`,
+        password: password,
+        login_host: login_host,
+        auto_reconnect: auto_reconnect,
+        network_type: networkType
+    };
+
+    try {
+        saveConfig(config);
+        log('Configuration saved successfully', LOG_LEVELS.INFO);
+    } catch (error) {
+        log(`Failed to save configuration: ${error.message}`, LOG_LEVELS.ERROR);
+        process.exit(1);
+    }
+
+    return config;
+}
+
+// Enhanced saveConfig function with backup
+function saveConfig(config) {
+    try {
+        // Create backup of existing config if it exists
+        if (fs.existsSync(CONFIG_FILE)) {
+            const backupFile = `${CONFIG_FILE}.backup`;
+            fs.copyFileSync(CONFIG_FILE, backupFile);
+        }
+
+        let configContent = '# Srun Login Configuration File\n';
+        configContent += `# Last updated: ${new Date().toISOString()}\n\n`;
+
+        Object.entries(config).forEach(([key, value]) => {
+            if (key in DEFAULT_CONFIG) {
+                configContent += `# ${getConfigDescription(key)}\n`;
+                configContent += `${key}=${value}\n\n`;
+            }
+        });
+
+        fs.writeFileSync(CONFIG_FILE, configContent, 'utf8');
+        log(`Configuration saved to: ${CONFIG_FILE}`, LOG_LEVELS.INFO);
+    } catch (error) {
+        log(`Failed to save configuration: ${error.message}`, LOG_LEVELS.ERROR);
+        throw error;
+    }
+}
+
+// Get configuration item description
+function getConfigDescription(key) {
+    const descriptions = {
+        username: 'Student ID with network type suffix (e.g., 12345678@cmcc)',
+        password: 'Login password',
+        login_host: 'Login server IP address',
+        auto_reconnect: 'Enable automatic reconnection (true/false)',
+        check_interval: 'Network check interval in seconds',
+        check_url: 'URL used for network connection test',
+        retry_interval: 'Interval between retry attempts in seconds',
+        max_retry_times: 'Maximum number of retry attempts (0 for unlimited)',
+        debug_mode: 'Enable debug logging (true/false)',
+        network_type: 'Campus network type (cmcc/ndcard/unicom/ncu)'
+    };
+    return descriptions[key] || key;
+}
+
+// Validate configuration completeness
+function validateConfig(config) {
+    return config.username && config.password && config.login_host;
+}
+
+// Load or create configuration
+let config = loadConfig();
+if (!validateConfig(config)) {
+    config = getUserConfig();
+}
+
+// Check network connection
+async function checkInternet() {
+    try {
+        await axios.get(config.check_url, { timeout: 5000 });
+        return true;
+    } catch (error) {
+        return false;
+    }
+}
+
 function md5(password, token) {
-    // 使用 token 对密码进行加密
+    // Encrypt password using token
     return crypto.createHash('md5').update(token + password).digest('hex');
 }
 
@@ -77,7 +348,7 @@ function l(a, b) {
     return b ? result.join('').substring(0, c) : result.join('');
 }
 
-// base64 编码函数
+// base64 encoding function
 function base64Encode(str) {
     const base64abc = 'LVoJPiCN2R8G90yg+hmFHuacZ1OWMnrsSTXkYpUq/3dlbfKwv6xztjI7DeBE45QA';
     let result = '';
@@ -98,54 +369,88 @@ function base64Encode(str) {
 
 function getEncodedUserInfo(info, token) {
     const jsonStr = JSON.stringify(info);
-    // 使用修改后的 base64 编码
+    // Use modified base64 encoding
     const encoded = '{SRBX1}' + base64Encode(xencode(jsonStr, token));
     return encoded;
 }
 
-async function getInitInfo() {
+async function getLoginParams() {
+    try {
+        // Access login page to get parameters
+        const response = await axios.get(`http://${config.login_host}`);
+        const url = new URL(response.request.res.responseUrl);
+        const params = Object.fromEntries(url.searchParams);
+
+        // Get ac_id
+        const acid = params.ac_id || '5';
+
+        // Get user_ip
+        const match = response.data.match(/<input type="hidden" name="user_ip" id="user_ip" value="([^"]+)"/);
+        const ip = match ? match[1] : '';
+
+        return {
+            acid,
+            ip
+        };
+    } catch (error) {
+        console.error('Failed to get login parameters:', error);
+        // Return default values
+        return {
+            acid: '5',
+            ip: ''
+        };
+    }
+}
+
+async function getInitInfo(username, ip) {
     const url = `http://${config.login_host}/cgi-bin/get_challenge`;
     const params = {
-        username: config.username,
-        ip: ''
+        username: username,
+        ip: ip
     };
 
     try {
         const response = await axios.get(url, { params });
         return response.data;
     } catch (error) {
-        console.error('获取初始化信息失败:', error);
+        console.error('Failed to get initialization information:', error);
         throw error;
     }
 }
 
 async function login() {
     try {
-        // 1. 获取challenge初始化信息
-        const initInfo = await getInitInfo();
-        console.log('获取到初始化信息:', initInfo);
+        // 1. Get login parameters
+        const loginParams = await getLoginParams();
+        log('Got login parameters: ' + JSON.stringify(loginParams));
+
+        const username = config.username;
+
+        // 2. Get challenge initialization information
+        const initInfo = await getInitInfo(username, loginParams.ip);
+        log('Got initialization information: ' + JSON.stringify(initInfo));
 
         const token = initInfo.challenge;
-        const ip = initInfo.client_ip;
+        const ip = loginParams.ip || initInfo.client_ip;
 
-        // 2. 加密处理 
-        const hmd5 = md5(config.password, token); // 修改md5加密方式
+        // 3. Encrypt password
+        const hmd5 = md5(config.password, token);
 
-        // 3. 修改info加密信息格式
+        // 4. Modify info encryption format
         const info = {
-            username: config.username,
+            username: username,
             password: config.password,
             ip: ip,
-            acid: '5',
+            acid: loginParams.acid,
             enc_ver: 'srun_bx1'
         };
 
         const encodedUser = getEncodedUserInfo(info, token);
 
-        // 4. 计算校验和
-        let str = token + config.username;
+        // 5. Calculate checksum
+        let str = token + username;
         str += token + hmd5;
-        str += token + '5';
+        str += token + loginParams.acid;
         str += token + ip;
         str += token + '200';
         str += token + '1';
@@ -153,13 +458,13 @@ async function login() {
 
         const checksum = sha1(str);
 
-        // 5. 发送登录请求
+        // 6. Send login request
         const loginUrl = `http://${config.login_host}/cgi-bin/srun_portal`;
         const params = {
             action: 'login',
-            username: config.username,
+            username: username,
             password: '{MD5}' + hmd5,
-            ac_id: '5',
+            ac_id: loginParams.acid,
             ip: ip,
             info: encodedUser,
             chksum: checksum,
@@ -171,12 +476,75 @@ async function login() {
         };
 
         const loginRes = await axios.get(loginUrl, { params });
-        console.log('登录结果:', loginRes.data);
-        console.log('Written By Sadak on the shore of the QingShanHu Lake 2025/4/22');
+        log('Login result: ' + JSON.stringify(loginRes.data));
+        return loginRes.data.error === 'ok';
 
     } catch (error) {
-        console.error('登录失败:', error);
+        log('Login failed: ' + error.message, true);
+        return false;
     }
 }
 
-login();
+async function startLoginLoop() {
+    let retryCount = 0;
+    log('Starting login monitoring...', LOG_LEVELS.INFO);
+
+    while (true) {
+        try {
+            const isConnected = await checkInternet();
+
+            if (!isConnected && config.auto_reconnect) {
+                log('Network disconnected, attempting to reconnect...', LOG_LEVELS.WARN);
+                const loginSuccess = await login();
+
+                if (loginSuccess) {
+                    log('Reconnection successful', LOG_LEVELS.INFO);
+                    retryCount = 0;
+                } else {
+                    retryCount++;
+                    if (config.max_retry_times > 0 && retryCount >= config.max_retry_times) {
+                        log('Maximum retry attempts reached, stopping reconnection', LOG_LEVELS.ERROR);
+                        break;
+                    }
+                    log(`Login failed, retrying in ${config.retry_interval} seconds... (Attempt ${retryCount})`, LOG_LEVELS.WARN);
+                    await new Promise(resolve => setTimeout(resolve, config.retry_interval * 1000));
+                }
+            } else {
+                if (config.debug_mode) {
+                    log('Network connection check passed', LOG_LEVELS.DEBUG);
+                }
+                await new Promise(resolve => setTimeout(resolve, config.check_interval * 1000));
+            }
+        } catch (error) {
+            log(`Error in login loop: ${error.message}`, LOG_LEVELS.ERROR);
+            await new Promise(resolve => setTimeout(resolve, config.retry_interval * 1000));
+        }
+    }
+}
+
+// Main program execution with error handling
+async function main() {
+    try {
+        config = loadConfig();
+        if (!validateConfig(config)) {
+            config = getUserConfig();
+        }
+
+        log('Starting Srun login client...', LOG_LEVELS.INFO);
+        log(`Configured for user: ${config.username}`, LOG_LEVELS.INFO);
+
+        if (config.auto_reconnect) {
+            log('Auto reconnect enabled', LOG_LEVELS.INFO);
+            await startLoginLoop();
+        } else {
+            log('Running in single login mode', LOG_LEVELS.INFO);
+            await login();
+        }
+    } catch (error) {
+        log(`Fatal error: ${error.message}`, LOG_LEVELS.ERROR);
+        process.exit(1);
+    }
+}
+
+// Start the program
+main();
