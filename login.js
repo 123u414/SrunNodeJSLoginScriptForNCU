@@ -21,7 +21,22 @@ const DEFAULT_CONFIG = {
     retry_interval: 30,
     max_retry_times: 0,
     debug_mode: false,
-    network_type: ''  // New field for storing network type
+    network_type: '',  // 网络类型（仅宿舍区需要）
+    location: ''     // 用户位置：'teaching'或'dormitory'
+};
+
+// 位置相关配置
+const LOCATIONS = {
+    teaching: {
+        name: '教学区(NCUWLAN)',
+        login_host: '222.204.3.221',
+        needsNetworkType: false
+    },
+    dormitory: {
+        name: '宿舍区(NCU-5G)',
+        login_host: '222.204.3.154',
+        needsNetworkType: true
+    }
 };
 
 // Log levels
@@ -79,8 +94,8 @@ function log(message, level = LOG_LEVELS.INFO, showConsole = true) {
 // Validate configuration values
 function validateConfigValue(key, value) {
     switch (key) {
-        case 'username':
-            return typeof value === 'string' && value.length > 0 && value.includes('@');
+        // case 'username':
+        //     return typeof value === 'string' && value.length > 0 && value.includes('@');
         case 'password':
             return typeof value === 'string' && value.length > 0;
         case 'login_host':
@@ -149,34 +164,48 @@ function getUserConfig() {
         log('Invalid input: Please enter numbers only', LOG_LEVELS.ERROR);
     }
 
-    // Network type selection with validation
-    const networkTypes = ['cmcc', 'ndcard', 'unicom', 'ncu'];
-    console.log('\nSelect your campus network type:');
-    networkTypes.forEach((type, index) => {
-        console.log(`${index + 1}. ${type}`);
-    });
+    // Location selection
+    console.log('\nSelect your location:');
+    console.log('1. Teaching Area (NCUWLAN 222.204.3.221)');
+    console.log('2. Dormitory Area (NCU-5G 222.204.3.154)');
 
-    let networkType;
+    let location;
+    let networkType = '';
+    let login_host;
     while (true) {
-        const choice = readlineSync.question('Enter number (1-4): ');
-        if (/^[1-4]$/.test(choice)) {
-            networkType = networkTypes[parseInt(choice) - 1];
+        const choice = readlineSync.question('Enter number (1-2): ');
+        if (choice === '1') {
+            location = 'teaching';
+            login_host = LOCATIONS.teaching.login_host;
+            break;
+        } else if (choice === '2') {
+            location = 'dormitory';
+            login_host = LOCATIONS.dormitory.login_host;
+            
+            // Only ask for network type in dormitory area
+            console.log('\nSelect your campus network type:');
+            const networkTypes = ['cmcc', 'ndcard', 'unicom', 'ncu'];
+            networkTypes.forEach((type, index) => {
+                console.log(`${index + 1}. ${type}`);
+            });
+
+            while (true) {
+                const netChoice = readlineSync.question('Enter number (1-4): ');
+                if (/^[1-4]$/.test(netChoice)) {
+                    networkType = networkTypes[parseInt(netChoice) - 1];
+                    break;
+                }
+                log('Invalid choice: Please enter a number between 1 and 4', LOG_LEVELS.ERROR);
+            }
             break;
         }
-        log('Invalid choice: Please enter a number between 1 and 4', LOG_LEVELS.ERROR);
+        log('Invalid choice: Please enter 1 or 2', LOG_LEVELS.ERROR);
     }
 
     const password = readlineSync.question('Please enter your password: ', { hideEchoBack: true });
     if (!password) {
         log('Password cannot be empty', LOG_LEVELS.ERROR);
         process.exit(1);
-    }
-
-    let login_host = readlineSync.question('Enter login server IP [222.204.3.154]: ').trim();
-    login_host = login_host || '222.204.3.154';
-    if (!/^(\d{1,3}\.){3}\d{1,3}$/.test(login_host)) {
-        log('Invalid IP address format, using default: 222.204.3.154', LOG_LEVELS.WARN);
-        login_host = '222.204.3.154';
     }
 
     // 修改自动重连选项的输入方式
@@ -195,11 +224,12 @@ function getUserConfig() {
 
     const config = {
         ...DEFAULT_CONFIG,
-        username: `${username}@${networkType}`,
+        username: location === 'teaching' ? username : `${username}@${networkType}`,
         password: password,
         login_host: login_host,
         auto_reconnect: auto_reconnect,
-        network_type: networkType
+        network_type: networkType,
+        location: location
     };
 
     try {
@@ -382,7 +412,7 @@ async function getLoginParams() {
         const params = Object.fromEntries(url.searchParams);
 
         // Get ac_id
-        const acid = params.ac_id || '5';
+        const acid = params.ac_id || '39';
 
         // Get user_ip
         const match = response.data.match(/<input type="hidden" name="user_ip" id="user_ip" value="([^"]+)"/);
@@ -477,7 +507,7 @@ async function login() {
 
         const loginRes = await axios.get(loginUrl, { params });
         log('Login result: ' + JSON.stringify(loginRes.data));
-        return loginRes.data.error === 'ok';
+        return loginRes.data.error === 'ok' || loginRes.data.error_msg ==='E2620: You are already online.';
 
     } catch (error) {
         log('Login failed: ' + error.message, true);
